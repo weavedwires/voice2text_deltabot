@@ -74,3 +74,20 @@ Notes for running it on another machine:
   `systemctl --user disable --now voice2text-bot.service`;
 - to keep the bot running without an active login session:
   `loginctl enable-linger $USER`.
+
+### Without systemd (uv tool)
+
+`uv tool install .` on its own is not enough: `uv` exposes only the
+`voice2text-bot` entry point, while `deltachat2` starts the core
+(`deltachat-rpc-server`) by name from `PATH`, so the bot dies with
+`FileNotFoundError: [Errno 2] No such file or directory: 'deltachat-rpc-server'`.
+Ask uv to expose the core as well:
+
+```sh
+uv tool install . --with-executables-from deltachat-rpc-server
+voice2text-bot --config-dir ~/.local/share/voice2text-bot init DCACCOUNT:cm1.wwire.su
+voice2text-bot --config-dir ~/.local/share/voice2text-bot serve
+```
+
+Note that the tool environment is separate from the project venv, so the core
+version there is whatever `deltachat2[full]` pins, same as everywhere else.
