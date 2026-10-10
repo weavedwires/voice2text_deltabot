@@ -1,4 +1,5 @@
 __pycache__
+.venv
 .cache
 .mypy_cache
 .pytest_cache
