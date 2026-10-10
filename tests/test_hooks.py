@@ -377,6 +377,7 @@ def on_start_args(**kwargs):
         "compute_type": "int8",
         "cpu_threads": 0,
         "model_idle_timeout": 30,
+        "no_auto_unload": False,
         "max_duration": 600,
     }
     args.update(kwargs)
@@ -415,6 +416,22 @@ def test_on_start_starts_the_idle_watchdog(monkeypatch):
     assert len(started) == 1
     assert started[0]["args"] == (30,)
     assert started[0]["daemon"] is True
+
+
+def test_no_auto_unload_keeps_the_model(monkeypatch):
+    started = []
+    monkeypatch.setattr(hooks, "WhisperModel", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        hooks.threading,
+        "Thread",
+        lambda **kwargs: SimpleNamespace(start=lambda: started.append(kwargs)),
+    )
+    bot = make_bot()
+
+    hooks.on_start(bot, on_start_args(model_idle_timeout=30, no_auto_unload=True))
+
+    assert started == []  # no watchdog, whatever the timeout says
+    assert "kept in memory" in bot.logger.info.call_args.args
 
 
 def test_model_is_loaded_on_first_use_and_reused(monkeypatch):

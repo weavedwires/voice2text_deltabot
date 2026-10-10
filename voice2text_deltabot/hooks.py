@@ -75,6 +75,14 @@ cli.add_generic_option(
         " which on CPU takes seconds to a minute depending on the model."
     ),
 )
+cli.add_generic_option(
+    "--no-auto-unload",
+    action="store_true",
+    help=(
+        "never free the model, i.e. keep it in memory once it is loaded (the same as"
+        " --model-idle-timeout 0, but readable in a service unit)"
+    ),
+)
 HELP = (
     "I'm a Delta Chat bot, send me any voice message to convert it to text,"
     " you can also use me in groups.\n\nNo 3rd party service is involved,"
@@ -226,7 +234,7 @@ def _on_init(bot: Bot, args: Namespace) -> None:
 def on_start(bot: Bot, args: Namespace) -> None:
     global LOGGER  # pylint: disable=W0603
     LOGGER = bot.logger
-    idle = args.model_idle_timeout
+    idle = 0 if args.no_auto_unload else args.model_idle_timeout
     bot.logger.info(
         "whisper: model=%s compute_type=%s cpu_threads=%d (logical=%s, physical=%s);"
         " loaded on demand, %s",
