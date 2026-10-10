@@ -40,9 +40,9 @@ Usage: install-user-service.sh [options]
   --chatmail HOST        create a chatmail account (DCACCOUNT:HOST), e.g. cm1.wwire.su
   --email ADDR           existing Delta Chat address; needs --password
   --password PASS        password for --email
-  --name NAME            unit and config name (default: voice2text-bot)
-  --config-dir PATH      bot data/accounts directory
-                         (default: ${XDG_DATA_HOME:-~/.local/share}/<name>)
+  --name NAME            name of the systemd unit (default: voice2text-bot)
+  --config-dir PATH      bot data/accounts directory (default: the folder the CLI
+                         itself uses, ~/.config/voice2text-bot on Linux)
   --model NAME           whisper model, e.g. small|medium|large (default: bot default)
   --compute-type TYPE    int8|float16|int8_float16 (default: int8)
   --extra-args "ARGS"    extra arguments appended to "serve"
@@ -80,7 +80,28 @@ done
     die "run this from the repository root (pyproject.toml not found)"
 
 repo=$(pwd)
-[ -n "$config_dir" ] || config_dir=${XDG_DATA_HOME:-$HOME/.local/share}/"$name"
+
+# Default to the config folder the CLI itself uses (appdirs), so an account created
+# by a plain `voice2text-bot init` is found instead of a second one being created
+# next to it.
+if [ -z "$config_dir" ]; then
+    config_dir=$(uv run --no-sync python -c \
+        'from appdirs import user_config_dir; print(user_config_dir("voice2text-bot"))' \
+        2>/dev/null || true)
+    [ -n "$config_dir" ] || config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/voice2text-bot
+fi
+
+# A silently created second account would break an existing chat with the bot, so
+# report where accounts already live when this folder has none.
+other_account_dirs() {
+    for dir in "$HOME/.config/voice2text-bot" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/voice2text-bot"; do
+        if [ "$dir" != "$config_dir" ] && [ -d "$dir/accounts" ]; then
+            printf '%s\n' "$dir"
+        fi
+    done
+}
+
 unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 unit_path=$unit_dir/$name.service
 
@@ -141,14 +162,23 @@ mkdir -p "$config_dir"
 accounts=$(run --config-dir "$config_dir" list 2>/dev/null || true)
 if [ -n "$accounts" ]; then
     printf '    found:\n%s\n' "$accounts"
-elif [ -n "$chatmail" ]; then
-    printf '    creating a chatmail account on %s...\n' "$chatmail"
-    run --config-dir "$config_dir" init "DCACCOUNT:$chatmail"
-elif [ -n "$email" ] && [ -n "$password" ]; then
-    printf '    configuring %s...\n' "$email"
-    run --config-dir "$config_dir" init "$email" "$password"
 else
-    die "no account in $config_dir: pass --chatmail HOST, or --email ADDR --password PASS"
+    others=$(other_account_dirs)
+    if [ -n "$others" ]; then
+        printf '    no account in %s, but accounts exist in:\n' "$config_dir"
+        printf '      %s\n' $others
+    fi
+    if [ -n "$chatmail" ]; then
+        printf '    creating a chatmail account on %s...\n' "$chatmail"
+        run --config-dir "$config_dir" init "DCACCOUNT:$chatmail"
+    elif [ -n "$email" ] && [ -n "$password" ]; then
+        printf '    configuring %s...\n' "$email"
+        run --config-dir "$config_dir" init "$email" "$password"
+    elif [ -n "$others" ]; then
+        die "refusing to create a second account: re-run with --config-dir <one of the paths above>, or pass --chatmail HOST"
+    else
+        die "no account in $config_dir: pass --chatmail HOST, or --email ADDR --password PASS"
+    fi
 fi
 
 printf '3/5 invitation link (scan it in Delta Chat):\n'

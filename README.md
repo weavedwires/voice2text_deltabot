@@ -53,6 +53,10 @@ cd voice2text_deltabot
 ./contrib/install-user-service.sh --chatmail cm1.wwire.su
 ```
 
+If the config folder has no account while accounts exist in another known location,
+it prints those paths and refuses to create a second one (pass `--config-dir` to use
+the existing account, or `--chatmail`/`--email` to deliberately create one).
+
 It runs `uv sync`, creates the account (`DCACCOUNT:<host>`, so no address or
 password is needed on a chatmail relay), renders `contrib/voice2text-bot.service.in`
 into `~/.config/systemd/user/`, enables and starts the service, and prints the
@@ -97,9 +101,13 @@ Ask uv to expose the core as well:
 
 ```sh
 uv tool install . --with-executables-from deltachat-rpc-server
-voice2text-bot --config-dir ~/.local/share/voice2text-bot init DCACCOUNT:cm1.wwire.su
-voice2text-bot --config-dir ~/.local/share/voice2text-bot serve
+voice2text-bot init DCACCOUNT:cm1.wwire.su
+voice2text-bot serve
 ```
+
+Both this and `contrib/install-user-service.sh` use the config folder the CLI itself
+picks (`~/.config/voice2text-bot` on Linux), so an account created one way is found
+by the other instead of a second one being created next to it.
 
 Note that the tool environment is separate from the project venv, so the core
 version there is whatever `deltachat2[full]` pins, same as everywhere else.
