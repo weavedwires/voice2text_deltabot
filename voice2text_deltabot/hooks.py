@@ -8,12 +8,15 @@ from deltabot_cli import BotCli
 from deltachat2 import (
     Bot,
     ChatType,
-    CoreEvent,
     EventType,
+    EventTypeError,
+    EventTypeInfo,
+    EventTypeSecurejoinInviterProgress,
+    EventTypeWarning,
     Message,
-    MessageViewtype,
-    MsgData,
+    MessageData,
     NewMsgEvent,
+    Viewtype,
     events,
 )
 from faster_whisper import WhisperModel
@@ -80,19 +83,19 @@ def on_start(_bot: Bot, args: Namespace) -> None:
 
 
 @cli.on(events.RawEvent)
-def _log_event(bot: Bot, accid: int, event: CoreEvent) -> None:
-    if event.kind == EventType.INFO:
+def _log_event(bot: Bot, accid: int, event: EventType) -> None:
+    if isinstance(event, EventTypeInfo):
         bot.logger.debug(event.msg)
-    elif event.kind == EventType.WARNING:
+    elif isinstance(event, EventTypeWarning):
         bot.logger.warning(event.msg)
-    elif event.kind == EventType.ERROR:
+    elif isinstance(event, EventTypeError):
         bot.logger.error(event.msg)
-    elif event.kind == EventType.SECUREJOIN_INVITER_PROGRESS:
+    elif isinstance(event, EventTypeSecurejoinInviterProgress):
         if event.progress == 1000:
             if not bot.rpc.get_contact(accid, event.contact_id).is_bot:
                 bot.logger.debug("QR scanned by contact id=%s", event.contact_id)
                 chatid = bot.rpc.create_chat_by_contact_id(accid, event.contact_id)
-                bot.rpc.send_msg(accid, chatid, MsgData(text=HELP))
+                bot.rpc.send_msg(accid, chatid, MessageData(text=HELP))
 
 
 @cli.after(events.NewMessage)
@@ -109,15 +112,15 @@ def on_newmsg(bot: Bot, accid: int, event: NewMsgEvent) -> None:
         if msg.is_bot:
             return
 
-    if msg.view_type in (MessageViewtype.VOICE, MessageViewtype.AUDIO):
+    if msg.view_type in (Viewtype.VOICE, Viewtype.AUDIO):
         _process_audio(bot, accid, msg)
     elif chat.chat_type == ChatType.SINGLE:
-        reply = MsgData(text=HELP)
+        reply = MessageData(text=HELP)
         bot.rpc.send_msg(accid, msg.chat_id, reply)
 
 
 def _process_audio(bot: Bot, accid: int, msg: Message) -> None:
-    reply = MsgData(text="⏳", quoted_message_id=msg.id)
+    reply = MessageData(text="⏳", quoted_message_id=msg.id)
     msgid = bot.rpc.send_msg(accid, msg.chat_id, reply)
     start = time.time()
     segments, info = MODEL.transcribe(msg.file)

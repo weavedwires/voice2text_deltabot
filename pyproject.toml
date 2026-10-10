@@ -7,7 +7,7 @@ name = "voice2text-deltabot"
 description = "Delta Chat bot to extract text from voice messages"
 dynamic = ["version"]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 keywords = ["deltachat", "bot"]
 authors = [
   {name = "adbenitez", email = "adb@arcanechat.me"},
@@ -17,22 +17,30 @@ classifiers = [
   "Programming Language :: Python",
   "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
 ]
+# hooks.py targets the deltabot-cli 9.x / deltachat2 2.x API
+# (Event/Viewtype/MessageData instead of CoreEvent/MessageViewtype/MsgData).
+# Python 3.13 only: settled minimum for this fork (3.10 is out anyway —
+# faster-whisper -> onnxruntime>=1.24 dropped cp310 wheels).
 dependencies = [
-    "deltabot-cli>=8.0.0,<9.0",
-    "faster-whisper",
+    "deltabot-cli>=9.1.0,<10.0",
+    "deltachat2[full]>=2.58.0,<3.0",
+    "faster-whisper>=1.2.1,<2.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/deltachat-bot/voice2text_deltabot"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
   "black",
-  "mypy",
   "isort",
-  "pylint",
+  "mypy",
   "pylama",
+  "pylint",
   "pytest",
+  # pylama 8.x still imports pkg_resources, removed in setuptools 81;
+  # uv venvs do not ship setuptools at all.
+  "setuptools<81",
 ]
 
 [project.scripts]
@@ -44,6 +52,11 @@ version_file = "voice2text_deltabot/_version.py"
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pylama ships a pytest11 entry point whose hook signature is invalid for pytest 9.
+addopts = "-p no:pylama"
 
 [tool.mypy]
 ignore_missing_imports = "True"
