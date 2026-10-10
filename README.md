@@ -91,3 +91,17 @@ voice2text-bot --config-dir ~/.local/share/voice2text-bot serve
 
 Note that the tool environment is separate from the project venv, so the core
 version there is whatever `deltachat2[full]` pins, same as everywhere else.
+
+Do **not** keep a second `deltachat-rpc-server` tool on the same `PATH`: the bot
+starts the core by name, so a newer core installed separately (e.g.
+`uv tool install deltachat-rpc-server` for other purposes) wins, and then every
+event fails with
+
+```
+dacite.exceptions.MissingValueError: missing value for field "is_verified"
+```
+
+Core 2.62 replaced that field with `freshness`, while the bindings (2.58.0, newest
+on PyPI) still require it. Check with `which -a deltachat-rpc-server` and
+`deltachat-rpc-server --version` - the bot needs the 2.58.0 binary that ships in
+its own environment.
