@@ -25,6 +25,9 @@ dependencies = [
     "deltabot-cli>=9.1.0,<10.0",
     "deltachat2[full]>=2.58.0,<3.0",
     "faster-whisper>=1.2.1,<2.0",
+    # PyAV 19 dropped the metadata_encoding/metadata_errors arguments of av.open(),
+    # which faster-whisper 1.2.1 still passes: transcription fails on every message.
+    "av>=11,<19",
 ]
 
 [project.urls]
