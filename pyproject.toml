@@ -29,7 +29,6 @@ dependencies = [
     # which faster-whisper 1.2.1 still passes: transcription fails on every message.
     "av>=11,<19",
 ]
-
 [project.urls]
 Homepage = "https://github.com/deltachat-bot/voice2text_deltabot"
 
