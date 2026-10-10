@@ -55,6 +55,11 @@ dev = [
 [project.scripts]
 voice2text-bot = "voice2text_deltabot:main"
 
+[tool.setuptools]
+# flat-layout auto-discovery refuses to build as soon as a second top-level
+# directory appears (contrib/, etc.): name the package explicitly
+packages = ["voice2text_deltabot"]
+
 [tool.setuptools_scm]
 # can be empty if no extra settings are needed, presence enables setuptools_scm
 version_file = "voice2text_deltabot/_version.py"

@@ -42,3 +42,35 @@ To see the available options, run in the command line:
 ```
 voice2text-bot --help
 ```
+
+## Run as a systemd user service
+
+`contrib/install-user-service.sh` does the whole setup, no root needed:
+
+```sh
+git clone https://github.com/adbenitez/voice2text_deltabot
+cd voice2text_deltabot
+./contrib/install-user-service.sh --chatmail cm1.wwire.su
+```
+
+It runs `uv sync`, creates the account (`DCACCOUNT:<host>`, so no address or
+password is needed on a chatmail relay), renders `contrib/voice2text-bot.service.in`
+into `~/.config/systemd/user/`, enables and starts the service, and prints the
+invitation link to scan in Delta Chat. `--dry-run` prints what it would do and
+`--help` lists the options (`--email`/`--password`, `--model`, `--name`,
+`--config-dir`).
+
+Notes for running it on another machine:
+
+- **Python 3.13+** is required (`uv` can fetch it itself), and the only thing the
+  machine needs is `uv`; everything else lives in the project venv.
+- the Delta Chat core comes from that venv on purpose — do not install a
+  separately managed core, see the note in `pyproject.toml`;
+- the first start downloads the whisper model and the bot only starts answering
+  once it is loaded. `large` (the default) is ~2.9 GB on disk and needs roughly
+  4 GB of RAM; on a weak CPU `--model small` is the sane choice and `medium` is a
+  reasonable compromise;
+- logs: `journalctl --user -u voice2text-bot.service -f`, stop:
+  `systemctl --user disable --now voice2text-bot.service`;
+- to keep the bot running without an active login session:
+  `loginctl enable-linger $USER`.
