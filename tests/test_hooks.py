@@ -1,6 +1,7 @@
 """Unit tests for voice2text_deltabot.hooks."""
 
 import dataclasses
+import time
 from argparse import Namespace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
@@ -84,12 +85,22 @@ class FakeModel:
 
 @pytest.fixture(autouse=True)
 def isolate_module_state():
-    """Keep MODEL/ARGS changes out of other tests."""
-    old_model, old_args = hooks.MODEL, hooks.ARGS
+    """Keep model/ARGS changes out of other tests."""
+    old = hooks.MODEL, hooks.ARGS, hooks.LOGGER, hooks.MODEL_USED_AT
     hooks.MODEL = FakeModel([seg(1.0, "test")])
-    hooks.ARGS = Namespace(max_duration=600)
+    hooks.ARGS = Namespace(
+        max_duration=600,
+        model="small",
+        compute_type="int8",
+        cpu_threads=0,
+        model_idle_timeout=30,
+    )
+    hooks.LOGGER = MagicMock()
+    hooks.MODEL_USED_AT = 0.0
     yield
-    hooks.MODEL, hooks.ARGS = old_model, old_args
+    hooks.MODEL, hooks.ARGS, hooks.LOGGER, hooks.MODEL_USED_AT = old
+    if hooks.MODEL_LOCK.locked():  # a test left it held
+        hooks.MODEL_LOCK.release()
 
 
 def newmsg_event(msg):
@@ -346,52 +357,133 @@ def test_resolve_cpu_threads_falls_back_to_cpu_count(monkeypatch):
     assert hooks.resolve_cpu_threads(0) == 5
 
 
-def test_on_start_gives_the_model_the_measured_threads(monkeypatch):
-    created = {}
+def whisper_factory(monkeypatch, calls, segments=None):
+    """Patch WhisperModel with a recorder that still transcribes."""
 
     class FakeWhisperModel:
         def __init__(self, model, **kwargs):
-            created["model"] = model
-            created.update(kwargs)
+            calls.append({"model": model, **kwargs})
+            self._model = FakeModel(segments or [seg(1.0, "загружено лениво")])
+
+        def transcribe(self, path):
+            return self._model.transcribe(path)
 
     monkeypatch.setattr(hooks, "WhisperModel", FakeWhisperModel)
-    monkeypatch.setattr(hooks.os, "process_cpu_count", lambda: 12)
-    bot = make_bot()
 
-    hooks.on_start(bot, Namespace(model="small", compute_type="int8", cpu_threads=0))
 
-    assert created == {
+def on_start_args(**kwargs):
+    args = {
         "model": "small",
-        "device": "auto",
         "compute_type": "int8",
-        "cpu_threads": 12,
+        "cpu_threads": 0,
+        "model_idle_timeout": 30,
+        "max_duration": 600,
     }
-    assert hooks.MODEL is not None
+    args.update(kwargs)
+    return Namespace(**args)
 
 
-def test_on_start_honours_an_explicit_thread_count(monkeypatch):
-    created = {}
-
-    class FakeWhisperModel:
-        def __init__(self, model, **kwargs):
-            created.update(kwargs)
-
-    monkeypatch.setattr(hooks, "WhisperModel", FakeWhisperModel)
+def test_on_start_does_not_load_the_model(monkeypatch):
+    calls = []
+    whisper_factory(monkeypatch, calls)
+    hooks.MODEL = None
     bot = make_bot()
 
-    hooks.on_start(bot, Namespace(model="large", compute_type="int8", cpu_threads=3))
+    hooks.on_start(bot, on_start_args(model="large", model_idle_timeout=0))
 
-    assert created["cpu_threads"] == 3
-
-
-def test_on_start_logs_what_it_measured(monkeypatch):
-    monkeypatch.setattr(hooks, "WhisperModel", lambda *a, **kw: None)
-    monkeypatch.setattr(hooks.os, "process_cpu_count", lambda: 12)
-    bot = make_bot()
-
-    hooks.on_start(bot, Namespace(model="small", compute_type="int8", cpu_threads=0))
-
+    assert calls == []
+    assert hooks.MODEL is None
     bot.logger.info.assert_called_once()
     message, *rest = bot.logger.info.call_args.args
     assert "cpu_threads" in message
-    assert 12 in rest
+    assert "kept in memory" in rest
+
+
+def test_on_start_starts_the_idle_watchdog(monkeypatch):
+    started = []
+    monkeypatch.setattr(hooks, "WhisperModel", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        hooks.threading,
+        "Thread",
+        lambda **kwargs: SimpleNamespace(start=lambda: started.append(kwargs)),
+    )
+
+    hooks.on_start(make_bot(), on_start_args(model_idle_timeout=0))
+    assert started == []
+
+    hooks.on_start(make_bot(), on_start_args(model_idle_timeout=30))
+    assert len(started) == 1
+    assert started[0]["args"] == (30,)
+    assert started[0]["daemon"] is True
+
+
+def test_model_is_loaded_on_first_use_and_reused(monkeypatch):
+    calls = []
+    whisper_factory(monkeypatch, calls)
+    hooks.MODEL = None
+    hooks.ARGS = on_start_args(model="large", cpu_threads=3)
+
+    with hooks.model_in_use() as model:
+        assert model is not None
+    assert calls == [
+        {"model": "large", "device": "auto", "compute_type": "int8", "cpu_threads": 3}
+    ]
+
+    loaded = hooks.MODEL
+    with hooks.model_in_use() as again:
+        assert again is loaded
+    assert len(calls) == 1  # not loaded a second time
+
+
+def test_model_is_loaded_when_a_message_needs_it(monkeypatch):
+    calls = []
+    whisper_factory(monkeypatch, calls, [seg(1.0, "ленивая загрузка")])
+    hooks.MODEL = None
+    bot = make_bot()
+
+    hooks._process_audio(bot, 1, make_msg(view_type=Viewtype.VOICE))
+
+    assert len(calls) == 1
+    bot.rpc.send_edit_request.assert_called_once_with(1, 42, "ленивая загрузка")
+
+
+def test_process_audio_marks_the_model_as_used():
+    hooks.MODEL_USED_AT = 0.0
+    bot = make_bot()
+
+    hooks._process_audio(bot, 1, make_msg(view_type=Viewtype.VOICE))
+
+    assert hooks.MODEL_USED_AT > 0
+
+
+def test_idle_model_is_freed():
+    hooks.MODEL = object()
+    hooks.MODEL_USED_AT = time.monotonic() - 31
+
+    assert hooks.unload_if_idle(30) is True
+    assert hooks.MODEL is None
+
+
+def test_fresh_model_is_kept():
+    hooks.MODEL = object()
+    hooks.MODEL_USED_AT = time.monotonic()
+
+    assert hooks.unload_if_idle(30) is False
+    assert hooks.MODEL is not None
+
+
+def test_model_is_kept_while_it_is_transcribing():
+    hooks.MODEL = object()
+    hooks.MODEL_USED_AT = time.monotonic() - 31
+    assert hooks.MODEL_LOCK.acquire(blocking=False)
+    try:
+        assert hooks.unload_if_idle(30) is False
+    finally:
+        hooks.MODEL_LOCK.release()
+    assert hooks.MODEL is not None
+
+
+def test_nothing_to_unload_without_a_model():
+    hooks.MODEL = None
+
+    assert hooks.unload_if_idle(30) is False

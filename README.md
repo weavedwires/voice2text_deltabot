@@ -70,6 +70,12 @@ Notes for running it on another machine:
   once it is loaded. `large` (the default) is ~2.9 GB on disk and needs roughly
   4 GB of RAM; on a weak CPU `--model small` is the sane choice and `medium` is a
   reasonable compromise;
+- the model is loaded on the first voice message and freed after
+  `--model-idle-timeout` seconds without one (default 30, `0` keeps it loaded).
+  Measured with `large`/int8 on a 2-core box: loading costs 26-77 s and 3.2 GB RSS,
+  and unloading does give the memory back (3.2 GB -> 85 MB), so the timeout is a
+  trade-off between idle memory and the wait on the next message - 30 s suits
+  `small`, for `large` something like 300 is friendlier;
 - the model is given every CPU the process may use, because CTranslate2 caps its
   own default at 4 threads - on a bigger machine pass `--cpu-threads N`. What was
   measured (the chosen number, plus the logical and physical counts) is logged at

@@ -1,9 +1,14 @@
 """Event handlers and hooks."""
 
+import contextlib
+import ctypes
+import gc
 import logging
 import os
+import threading
 import time
 from argparse import Namespace
+from typing import Iterator
 
 from deltabot_cli import BotCli
 from deltachat2 import (
@@ -60,6 +65,16 @@ cli.add_generic_option(
         " machine."
     ),
 )
+cli.add_generic_option(
+    "--model-idle-timeout",
+    type=int,
+    default=30,
+    help=(
+        "free the whisper model after this many seconds without a message, 0 = keep"
+        " it loaded (default: %(default)s). The next message has to load it again,"
+        " which on CPU takes seconds to a minute depending on the model."
+    ),
+)
 HELP = (
     "I'm a Delta Chat bot, send me any voice message to convert it to text,"
     " you can also use me in groups.\n\nNo 3rd party service is involved,"
@@ -67,6 +82,13 @@ HELP = (
 )
 MODEL: WhisperModel = None  # noqa
 ARGS = Namespace()
+LOGGER: logging.Logger = logging.getLogger(__name__)
+
+# The model is loaded on demand and freed when idle, so both need guarding: the
+# lock is held for the whole transcription, the timestamp marks the last use.
+MODEL_LOCK = threading.Lock()
+MODEL_USED_AT = 0.0
+IDLE_CHECK_SECONDS = 5
 
 
 def physical_cpu_count(cpuinfo: str = "/proc/cpuinfo") -> int:
@@ -104,6 +126,83 @@ def resolve_cpu_threads(requested: int) -> int:
     return os.process_cpu_count() or os.cpu_count() or 1
 
 
+def load_model() -> WhisperModel:
+    """Load the whisper model; caller must hold MODEL_LOCK."""
+    threads = resolve_cpu_threads(ARGS.cpu_threads)
+    started = time.monotonic()
+    model = WhisperModel(
+        ARGS.model,
+        device="auto",
+        compute_type=ARGS.compute_type,
+        cpu_threads=threads,
+    )
+    LOGGER.info(
+        "whisper: loaded model=%s compute_type=%s cpu_threads=%d (logical=%s,"
+        " physical=%s) in %.1fs",
+        ARGS.model,
+        ARGS.compute_type,
+        threads,
+        os.process_cpu_count(),
+        physical_cpu_count() or "unknown",
+        time.monotonic() - started,
+    )
+    return model
+
+
+def free_model() -> None:
+    """Drop the model and give its memory back to the OS.
+
+    Dropping the Python reference alone is not enough here: CTranslate2 allocates
+    through glibc, which keeps freed blocks in its own arenas, so malloc_trim() is
+    what actually returns a few gigabytes to the system on a large model.
+    """
+    global MODEL, MODEL_USED_AT  # pylint: disable=W0603
+    MODEL = None
+    MODEL_USED_AT = 0.0
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):  # not glibc (macOS, musl, Windows)
+        pass
+
+
+@contextlib.contextmanager
+def model_in_use() -> Iterator[WhisperModel]:
+    """Yield the model, loading it on first use and keeping it loaded meanwhile."""
+    global MODEL, MODEL_USED_AT  # pylint: disable=W0603
+    with MODEL_LOCK:
+        if MODEL is None:
+            MODEL = load_model()
+        MODEL_USED_AT = time.monotonic()
+        try:
+            yield MODEL
+        finally:
+            MODEL_USED_AT = time.monotonic()
+
+
+def unload_if_idle(timeout: int) -> bool:
+    """Free the model when nothing has used it for `timeout` seconds."""
+    # `with` cannot express a non-blocking probe, and that probe is the point: it
+    # tells us whether a transcription holds the lock right now.
+    # pylint: disable-next=consider-using-with
+    if MODEL is None or not MODEL_LOCK.acquire(blocking=False):
+        return False  # nothing loaded, or a transcription is running
+    try:
+        if MODEL is not None and time.monotonic() - MODEL_USED_AT >= timeout:
+            free_model()
+            LOGGER.info("whisper: idle for %ds, model unloaded", timeout)
+            return True
+        return False
+    finally:
+        MODEL_LOCK.release()
+
+
+def _idle_watchdog(timeout: int) -> None:
+    while True:
+        time.sleep(min(IDLE_CHECK_SECONDS, timeout))
+        unload_if_idle(timeout)
+
+
 @cli.on_init
 def _on_init(bot: Bot, args: Namespace) -> None:
     global ARGS
@@ -125,22 +224,23 @@ def _on_init(bot: Bot, args: Namespace) -> None:
 
 @cli.on_start
 def on_start(bot: Bot, args: Namespace) -> None:
-    global MODEL  # pylint: disable=W0603
-    threads = resolve_cpu_threads(args.cpu_threads)
+    global LOGGER  # pylint: disable=W0603
+    LOGGER = bot.logger
+    idle = args.model_idle_timeout
     bot.logger.info(
-        "whisper: model=%s compute_type=%s cpu_threads=%d (logical=%s, physical=%s)",
+        "whisper: model=%s compute_type=%s cpu_threads=%d (logical=%s, physical=%s);"
+        " loaded on demand, %s",
         args.model,
         args.compute_type,
-        threads,
+        resolve_cpu_threads(args.cpu_threads),
         os.process_cpu_count(),
         physical_cpu_count() or "unknown",
+        f"freed after {idle}s idle" if idle > 0 else "kept in memory",
     )
-    MODEL = WhisperModel(
-        args.model,
-        device="auto",
-        compute_type=args.compute_type,
-        cpu_threads=threads,
-    )
+    if idle > 0:
+        threading.Thread(
+            target=_idle_watchdog, args=(idle,), name="whisper-idle", daemon=True
+        ).start()
 
 
 @cli.on(events.RawEvent)
@@ -184,21 +284,22 @@ def _process_audio(bot: Bot, accid: int, msg: Message) -> None:
     reply = MessageData(text="⏳", quoted_message_id=msg.id)
     msgid = bot.rpc.send_msg(accid, msg.chat_id, reply)
     start = time.time()
-    segments, info = MODEL.transcribe(msg.file)
     lines = []
-    last_time = 0
-    for seg in segments:
-        if seg.end > ARGS.max_duration:
-            lines.append("[...]")
-            break
-        if seg.avg_logprob < -0.7 or seg.no_speech_prob > 0.5:
-            continue
-        text = seg.text.strip()
-        if text.strip("."):
-            lines.append(text)
-        if seg.end - last_time > 10 and info.duration - seg.end > 10:
-            last_time = seg.end
-            bot.rpc.send_edit_request(accid, msgid, "\n".join(lines) + "\n\n⏳")
+    with model_in_use() as model:
+        segments, info = model.transcribe(msg.file)
+        last_time = 0
+        for seg in segments:
+            if seg.end > ARGS.max_duration:
+                lines.append("[...]")
+                break
+            if seg.avg_logprob < -0.7 or seg.no_speech_prob > 0.5:
+                continue
+            text = seg.text.strip()
+            if text.strip("."):
+                lines.append(text)
+            if seg.end - last_time > 10 and info.duration - seg.end > 10:
+                last_time = seg.end
+                bot.rpc.send_edit_request(accid, msgid, "\n".join(lines) + "\n\n⏳")
     took = time.time() - start
     percent = int(info.language_probability * 100)
     bot.logger.info(
