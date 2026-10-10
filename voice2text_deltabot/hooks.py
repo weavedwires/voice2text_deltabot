@@ -1,6 +1,7 @@
 """Event handlers and hooks."""
 
 import logging
+import os
 import time
 from argparse import Namespace
 
@@ -48,6 +49,17 @@ cli.add_generic_option(
     choices=["int8", "float16", "int8_float16"],
     default="int8",
 )
+cli.add_generic_option(
+    "--cpu-threads",
+    type=int,
+    default=0,
+    help=(
+        "number of CPU threads for the whisper model, 0 = all CPUs available to the"
+        " process (default: %(default)s). CTranslate2 caps its own default at 4"
+        " threads, which is why the model may use only a few cores on a bigger"
+        " machine."
+    ),
+)
 HELP = (
     "I'm a Delta Chat bot, send me any voice message to convert it to text,"
     " you can also use me in groups.\n\nNo 3rd party service is involved,"
@@ -55,6 +67,41 @@ HELP = (
 )
 MODEL: WhisperModel = None  # noqa
 ARGS = Namespace()
+
+
+def physical_cpu_count(cpuinfo: str = "/proc/cpuinfo") -> int:
+    """Number of physical cores, or 0 when it cannot be determined.
+
+    Only Linux exposes this: `os.process_cpu_count()` counts logical CPUs, so with
+    SMT enabled (and on some virtual machines) the physical count has to be read
+    from /proc/cpuinfo, where it is the number of distinct (physical id, core id)
+    pairs.
+    """
+    try:
+        with open(cpuinfo, encoding="utf-8") as fp:
+            lines = fp.read().splitlines()
+    except OSError:
+        return 0
+    cores = set()
+    physical_id = "0"
+    for line in lines:
+        if not line.strip():
+            physical_id = "0"
+            continue
+        key, _, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if key == "physical id":
+            physical_id = value
+        elif key == "core id":
+            cores.add((physical_id, value))
+    return len(cores)
+
+
+def resolve_cpu_threads(requested: int) -> int:
+    """Threads to give the model: the flag if set, else every usable CPU."""
+    if requested > 0:
+        return requested
+    return os.process_cpu_count() or os.cpu_count() or 1
 
 
 @cli.on_init
@@ -77,9 +124,23 @@ def _on_init(bot: Bot, args: Namespace) -> None:
 
 
 @cli.on_start
-def on_start(_bot: Bot, args: Namespace) -> None:
+def on_start(bot: Bot, args: Namespace) -> None:
     global MODEL  # pylint: disable=W0603
-    MODEL = WhisperModel(args.model, device="auto", compute_type=args.compute_type)
+    threads = resolve_cpu_threads(args.cpu_threads)
+    bot.logger.info(
+        "whisper: model=%s compute_type=%s cpu_threads=%d (logical=%s, physical=%s)",
+        args.model,
+        args.compute_type,
+        threads,
+        os.process_cpu_count(),
+        physical_cpu_count() or "unknown",
+    )
+    MODEL = WhisperModel(
+        args.model,
+        device="auto",
+        compute_type=args.compute_type,
+        cpu_threads=threads,
+    )
 
 
 @cli.on(events.RawEvent)

@@ -70,6 +70,11 @@ Notes for running it on another machine:
   once it is loaded. `large` (the default) is ~2.9 GB on disk and needs roughly
   4 GB of RAM; on a weak CPU `--model small` is the sane choice and `medium` is a
   reasonable compromise;
+- the model is given every CPU the process may use, because CTranslate2 caps its
+  own default at 4 threads - on a bigger machine pass `--cpu-threads N`. What was
+  measured (the chosen number, plus the logical and physical counts) is logged at
+  startup; more threads than physical cores rarely helps, so the flag is also the
+  way to cap it;
 - logs: `journalctl --user -u voice2text-bot.service -f`, stop:
   `systemctl --user disable --now voice2text-bot.service`;
 - to keep the bot running without an active login session:

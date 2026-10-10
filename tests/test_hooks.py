@@ -286,3 +286,112 @@ def test_securejoin_incomplete_progress_is_ignored():
 
     bot.rpc.get_contact.assert_not_called()
     bot.rpc.send_msg.assert_not_called()
+
+
+# --- CPU threads ----------------------------------------------------------------
+
+PROC_CPUINFO = """processor\t: 0
+physical id\t: 0
+core id\t\t: 0
+
+processor\t: 1
+physical id\t: 0
+core id\t\t: 1
+
+processor\t: 2
+physical id\t: 1
+core id\t\t: 0
+
+processor\t: 3
+physical id\t: 1
+core id\t\t: 1
+"""
+
+
+def test_physical_cpu_count_counts_distinct_core_ids(tmp_path):
+    path = tmp_path / "cpuinfo"
+    path.write_text(PROC_CPUINFO, encoding="utf-8")
+
+    assert hooks.physical_cpu_count(str(path)) == 4
+
+
+def test_physical_cpu_count_without_core_id(tmp_path):
+    """VMs often expose no core id at all; that must not be read as one core."""
+    path = tmp_path / "cpuinfo"
+    path.write_text(
+        "processor\t: 0\nmodel name\t: Intel(R) Xeon(R)\n", encoding="utf-8"
+    )
+
+    assert hooks.physical_cpu_count(str(path)) == 0
+
+
+def test_physical_cpu_count_missing_file():
+    assert hooks.physical_cpu_count("/nonexistent/cpuinfo") == 0
+
+
+def test_resolve_cpu_threads_prefers_the_flag():
+    assert hooks.resolve_cpu_threads(12) == 12
+
+
+def test_resolve_cpu_threads_uses_every_usable_cpu(monkeypatch):
+    monkeypatch.setattr(hooks.os, "process_cpu_count", lambda: 12)
+
+    assert hooks.resolve_cpu_threads(0) == 12
+
+
+def test_resolve_cpu_threads_falls_back_to_cpu_count(monkeypatch):
+    monkeypatch.setattr(hooks.os, "process_cpu_count", lambda: None)
+    monkeypatch.setattr(hooks.os, "cpu_count", lambda: 5)
+
+    assert hooks.resolve_cpu_threads(0) == 5
+
+
+def test_on_start_gives_the_model_the_measured_threads(monkeypatch):
+    created = {}
+
+    class FakeWhisperModel:
+        def __init__(self, model, **kwargs):
+            created["model"] = model
+            created.update(kwargs)
+
+    monkeypatch.setattr(hooks, "WhisperModel", FakeWhisperModel)
+    monkeypatch.setattr(hooks.os, "process_cpu_count", lambda: 12)
+    bot = make_bot()
+
+    hooks.on_start(bot, Namespace(model="small", compute_type="int8", cpu_threads=0))
+
+    assert created == {
+        "model": "small",
+        "device": "auto",
+        "compute_type": "int8",
+        "cpu_threads": 12,
+    }
+    assert hooks.MODEL is not None
+
+
+def test_on_start_honours_an_explicit_thread_count(monkeypatch):
+    created = {}
+
+    class FakeWhisperModel:
+        def __init__(self, model, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(hooks, "WhisperModel", FakeWhisperModel)
+    bot = make_bot()
+
+    hooks.on_start(bot, Namespace(model="large", compute_type="int8", cpu_threads=3))
+
+    assert created["cpu_threads"] == 3
+
+
+def test_on_start_logs_what_it_measured(monkeypatch):
+    monkeypatch.setattr(hooks, "WhisperModel", lambda *a, **kw: None)
+    monkeypatch.setattr(hooks.os, "process_cpu_count", lambda: 12)
+    bot = make_bot()
+
+    hooks.on_start(bot, Namespace(model="small", compute_type="int8", cpu_threads=0))
+
+    bot.logger.info.assert_called_once()
+    message, *rest = bot.logger.info.call_args.args
+    assert "cpu_threads" in message
+    assert 12 in rest
